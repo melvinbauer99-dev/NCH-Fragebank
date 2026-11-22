@@ -1,6 +1,6 @@
-// Service worker: keeps the whole app offline. f2854b1358 is replaced at build time,
+// Service worker: keeps the whole app offline. 73808f42e7 is replaced at build time,
 // so each new build gets a new cache and the old one is removed.
-const VERSION = "f2854b1358";
+const VERSION = "73808f42e7";
 const APP_CACHE = "nch-app-" + VERSION;
 const FONT_CACHE = "nch-fonts-v1";
 const SHELL = ["./", "index.html", "manifest.webmanifest",
