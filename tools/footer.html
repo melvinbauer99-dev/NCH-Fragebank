@@ -1,0 +1,89 @@
+<style>
+.pwa-foot { padding-block: 0 calc(32px + env(safe-area-inset-bottom)); }
+.pwa-foot .panel { gap: 10px; }
+.pwa-foot h2 { font-family: var(--font-display); font-size: 1rem; margin: 0; }
+.pwa-foot p { margin: 0; font-size: 0.9rem; }
+.pwa-foot .row { display: flex; flex-wrap: wrap; gap: 8px; }
+.pwa-foot small { color: var(--muted); font-size: 0.8rem; }
+.pwa-update { position: fixed; left: 50%; transform: translateX(-50%); bottom: calc(16px + env(safe-area-inset-bottom));
+  background: var(--accent); color: var(--accent-ink); border-radius: var(--radius); padding: 10px 14px;
+  display: none; gap: 12px; align-items: center; box-shadow: 0 6px 24px rgba(0,0,0,.2); z-index: 50; max-width: calc(100% - 32px); }
+.pwa-update.show { display: flex; }
+.pwa-update button { background: var(--accent-ink); color: var(--accent); border: 0; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; }
+</style>
+<footer class="wrap pwa-foot">
+  <section class="panel">
+    <h2>Fortschritt zwischen Geräten übertragen</h2>
+    <p class="muted">Der Fortschritt wird nur auf diesem Gerät gespeichert. Exportiere ihn hier und importiere die Datei auf dem anderen Gerät. Beim Import wird zusammengeführt, nichts geht verloren.</p>
+    <div class="row">
+      <button class="btn" id="pwa-export" type="button">Exportieren</button>
+      <button class="btn" id="pwa-import" type="button">Importieren</button>
+      <input type="file" id="pwa-file" accept="application/json,.json" hidden>
+    </div>
+    <small id="pwa-msg"></small>
+    <small>Version {{VERSION}} · {{COUNT}} Fragen · <span id="pwa-offline">Offline-Modus wird eingerichtet…</span></small>
+  </section>
+</footer>
+<div class="pwa-update" id="pwa-update" role="status"><span>Neue Fragen verfügbar.</span><button type="button" id="pwa-reload">Neu laden</button></div>
+<script>
+(function () {
+  "use strict";
+  const KEY = "nch-fragebank-v1";
+  const msg = (t) => { document.getElementById("pwa-msg").textContent = t; };
+  function read() { try { return JSON.parse(localStorage.getItem(KEY) || "null"); } catch (e) { return null; } }
+  function pick(x, y) { return !x ? y : !y ? x : ((y.t || 0) > (x.t || 0) ? y : x); }
+  function merge(a, b) {
+    a = a || {}; b = b || {};
+    const out = { answers: {}, cases: {}, settings: {}, updatedAt: Math.max(a.updatedAt || 0, b.updatedAt || 0) };
+    for (const k of ["answers", "cases"]) {
+      const A = a[k] || {}, B = b[k] || {};
+      for (const id of new Set([...Object.keys(A), ...Object.keys(B)])) out[k][id] = pick(A[id], B[id]);
+    }
+    const sa = a.settings || {}, sb = b.settings || {};
+    out.settings = (sb.t || 0) > (sa.t || 0) ? Object.assign({}, sa, sb) : Object.assign({}, sb, sa);
+    return out;
+  }
+
+  document.getElementById("pwa-export").addEventListener("click", async () => {
+    const data = read();
+    if (!data) { msg("Noch kein Fortschritt gespeichert."); return; }
+    const name = "nch-fortschritt-" + new Date().toISOString().slice(0, 10) + ".json";
+    const blob = new Blob([JSON.stringify({ app: "nch-fragebank", exportedAt: Date.now(), progress: data })], { type: "application/json" });
+    const file = new File([blob], name, { type: "application/json" });
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: name }); msg("Exportiert."); return; }
+    } catch (e) { if (e && e.name === "AbortError") return; }
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name; document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+    msg("Exportiert als " + name + ".");
+  });
+
+  const fileIn = document.getElementById("pwa-file");
+  document.getElementById("pwa-import").addEventListener("click", () => fileIn.click());
+  fileIn.addEventListener("change", async () => {
+    const f = fileIn.files && fileIn.files[0]; fileIn.value = "";
+    if (!f) return;
+    try {
+      const j = JSON.parse(await f.text());
+      const incoming = j && j.progress ? j.progress : j;
+      if (!incoming || typeof incoming.answers !== "object") throw new Error("format");
+      localStorage.setItem(KEY, JSON.stringify(merge(read(), incoming)));
+      msg("Importiert. Die App lädt neu…");
+      setTimeout(() => location.reload(), 600);
+    } catch (e) { msg("Diese Datei konnte nicht gelesen werden."); }
+  });
+
+  const off = document.getElementById("pwa-offline");
+  if (!("serviceWorker" in navigator)) { off.textContent = "Offline-Modus wird von diesem Browser nicht unterstützt"; return; }
+  const hadController = !!navigator.serviceWorker.controller;
+  navigator.serviceWorker.register("sw.js", { updateViaCache: "none" }).then((reg) => {
+    navigator.serviceWorker.ready.then(() => { off.textContent = "offline verfügbar"; });
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") reg.update().catch(() => {}); });
+  }).catch(() => { off.textContent = "Offline-Modus nicht verfügbar"; });
+  navigator.serviceWorker.addEventListener("controllerchange", () => {
+    if (hadController) document.getElementById("pwa-update").classList.add("show");
+  });
+  document.getElementById("pwa-reload").addEventListener("click", () => location.reload());
+})();
+</script>
