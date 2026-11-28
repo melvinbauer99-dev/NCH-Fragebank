@@ -217,6 +217,220 @@ input[type="date"] { font: inherit; padding: 8px; border: 1px solid var(--line);
   <section class="panel"><p class="muted">Fragen werden geladen…</p></section>
 </main>
 
+<section class="wrap pwa-foot" id="gh-panel">
+  <section class="panel">
+    <h2>Mit GitHub verbinden (Wissenslücken an Claude)</h2>
+    <p class="muted" id="gh-info">Mit einem GitHub-Schlüssel werden deine eigenen Fragen („Lücken“) und dein Fortschritt automatisch an Claude geschickt, und Claudes Antworten erscheinen im Tab „Lücken“. Der Fortschritt ist dann auch auf allen verbundenen Geräten gleich.</p>
+    <div class="row" id="gh-form">
+      <input type="password" id="gh-token" placeholder="github_pat_…" autocomplete="off" style="flex:1;min-width:200px;padding:8px;border:1px solid var(--line, #ccc);border-radius:6px;font:inherit">
+      <button class="btn" id="gh-save" type="button">Verbinden</button>
+    </div>
+    <div class="row" id="gh-connected" hidden>
+      <button class="btn" id="gh-now" type="button">Jetzt synchronisieren</button>
+      <button class="btn ghost" id="gh-off" type="button">Trennen</button>
+    </div>
+    <small id="gh-msg"></small>
+  </section>
+</section>
+<script>
+/* GitHub-Sync für die Offline-App: stellt window.claude.use("db"/"user") bereit,
+   gespeichert als Issues im Repo (Label "luecke" = Wissenslücke, Label "fortschritt" = Fortschritt). */
+(function () {
+  "use strict";
+  const REPO = "melvinbauer99-dev/nch-fragebank";
+  const API = "https://api.github.com/repos/" + REPO;
+  const TK = "nch-fragebank-gh-token";
+  const MAP = "nch-fragebank-gh-map";
+  const POLL = 4 * 60 * 1000;
+  const $ = (id) => document.getElementById(id);
+  const say = (t) => { const el = $("gh-msg"); if (el) el.textContent = t; };
+  let token = null;
+  try { token = localStorage.getItem(TK); } catch (e) {}
+
+  function setupPanel() {
+    const on = !!token;
+    $("gh-form").hidden = on; $("gh-connected").hidden = !on;
+    if (on) say("Verbunden mit GitHub. Lücken und Fortschritt werden automatisch synchronisiert.");
+    $("gh-save").addEventListener("click", async () => {
+      const t = $("gh-token").value.trim();
+      if (!t) return;
+      say("Prüfe Schlüssel…");
+      try {
+        const r = await fetch(API + "/issues?per_page=1", { headers: { Authorization: "Bearer " + t, Accept: "application/vnd.github+json" } });
+        if (!r.ok) throw new Error(r.status);
+        localStorage.setItem(TK, t);
+        say("Verbunden. Die App lädt neu…");
+        setTimeout(() => location.reload(), 600);
+      } catch (e) { say("Der Schlüssel funktioniert nicht (" + e.message + "). Bitte Repo-Zugriff und Berechtigung „Issues: Read and write“ prüfen."); }
+    });
+    $("gh-off").addEventListener("click", () => { try { localStorage.removeItem(TK); localStorage.removeItem(MAP); } catch (e) {} location.reload(); });
+    $("gh-now").addEventListener("click", () => { pollAll(); say("Synchronisiere…"); });
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", setupPanel); else setupPanel();
+  if (!token) return;
+
+  // ---------- GitHub API ----------
+  async function gh(path, opts) {
+    opts = opts || {};
+    const r = await fetch(API + path, {
+      method: opts.method || "GET", cache: "no-store",
+      headers: { Authorization: "Bearer " + token, Accept: "application/vnd.github+json", "Content-Type": "application/json" },
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+    if (!r.ok) { const e = new Error("GitHub " + r.status); e.status = r.status; throw e; }
+    return r.status === 204 ? null : r.json();
+  }
+  async function listIssues(label) {
+    let out = [], page = 1;
+    for (;;) {
+      const batch = await gh("/issues?state=all&per_page=100&labels=" + label + "&page=" + page);
+      out = out.concat(batch.filter((i) => !i.pull_request));
+      if (batch.length < 100) return out;
+      page++;
+    }
+  }
+  let map = {};
+  try { map = JSON.parse(localStorage.getItem(MAP) || "{}") || {}; } catch (e) {}
+  const saveMap = () => { try { localStorage.setItem(MAP, JSON.stringify(map)); } catch (e) {} };
+
+  // ---------- Wissenslücken <-> Issues ----------
+  const GAP_RE = /<!-- gap:(\{[\s\S]*?\}) -->/;
+  const ANS_MARK = "<!-- answer -->";
+  function gapFromIssue(i) {
+    const body = i.body || "";
+    const m = body.match(GAP_RE);
+    if (!m) return null;
+    let g; try { g = JSON.parse(m[1]); } catch (e) { return null; }
+    const k = body.indexOf(ANS_MARK);
+    const answer = k >= 0 ? body.slice(k + ANS_MARK.length).replace(/^\s*## Antwort\s*/, "").trim() : "";
+    const upd = Date.parse(i.updated_at) || 0;
+    g.answer = answer;
+    g.answeredAt = answer ? (g.answeredAt || upd) : 0;
+    g.resolved = i.state === "closed" && !g.deleted;
+    g.t = Math.max(g.t || 0, upd);
+    g._num = i.number;
+    return g;
+  }
+  function gapBody(g, answerPart) {
+    const meta = { id: g.id, qid: g.qid, block: g.block, subtopic: g.subtopic, stem: g.stem, note: g.note,
+      createdAt: g.createdAt, answeredAt: g.answeredAt || 0, deleted: !!g.deleted, t: g.t || Date.now() };
+    return "**TB " + (g.block || "?") + " · " + (g.subtopic || "") + "** (" + g.qid + ")\n\n" +
+      "> " + String(g.stem || "").replace(/\n/g, "\n> ") + "\n\n" +
+      "**Meine Frage:** " + g.note + "\n\n" +
+      "<!-- gap:" + JSON.stringify(meta).replace(/-->/g, "--\\u003e") + " -->\n" +
+      (answerPart ? "\n" + ANS_MARK + answerPart : "");
+  }
+  function answerPartOf(body) { const k = (body || "").indexOf(ANS_MARK); return k >= 0 ? body.slice(k + ANS_MARK.length) : ""; }
+  const gapSubs = [];
+  let gapsReady = null;
+  async function pollGaps() {
+    const issues = await listIssues("luecke");
+    const docs = [];
+    issues.forEach((i) => { const g = gapFromIssue(i); if (g) { map[g.id] = i.number; const num = g._num; delete g._num; docs.push({ id: g.id, data: () => g, num }); } });
+    saveMap();
+    gapSubs.forEach((cb) => { try { cb({ docs }); } catch (e) {} });
+  }
+  async function setGap(id, g) {
+    await gapsReady;
+    const title = "Lücke: " + String(g.note || "").replace(/\s+/g, " ").slice(0, 70);
+    const num = map[id];
+    if (!num) {
+      if (g.deleted) return;
+      const i = await gh("/issues", { method: "POST", body: { title, body: gapBody(g, ""), labels: ["luecke"] } });
+      map[id] = i.number; saveMap();
+      return;
+    }
+    const cur = await gh("/issues/" + num);  // frisch lesen, damit Claudes Antwort nie überschrieben wird
+    const state = g.resolved || g.deleted ? "closed" : "open";
+    await gh("/issues/" + num, { method: "PATCH", body: { title, state, body: gapBody(g, answerPartOf(cur.body)) } });
+  }
+
+  // ---------- Fortschritt <-> ein Issue (gzip + base64) ----------
+  const PROG_TITLE = "Fortschritt (automatisch, nicht bearbeiten)";
+  let progNum = null, progSubs = [];
+  async function gz(str) {
+    if (!window.CompressionStream) return "json:" + btoa(unescape(encodeURIComponent(str)));
+    const s = new Blob([str]).stream().pipeThrough(new CompressionStream("gzip"));
+    const buf = new Uint8Array(await new Response(s).arrayBuffer());
+    let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode.apply(null, buf.subarray(i, i + 0x8000));
+    return "gzip:" + btoa(bin);
+  }
+  async function ungz(s) {
+    if (s.startsWith("json:")) return decodeURIComponent(escape(atob(s.slice(5))));
+    const bin = atob(s.slice(5)), buf = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+    const st = new Blob([buf]).stream().pipeThrough(new DecompressionStream("gzip"));
+    return await new Response(st).text();
+  }
+  function summary(p) {
+    const a = Object.entries((p && p.answers) || {});
+    const wrong = a.filter(([, v]) => v && v.r !== 2).sort((x, y) => (y[1].t || 0) - (x[1].t || 0)).map(([k]) => k);
+    return "Beantwortet: " + a.length + " · zuletzt falsch/teilweise: " + wrong.length + "\n\nZuletzt falsch: " + wrong.slice(0, 60).join(", ");
+  }
+  async function findProg() {
+    if (progNum) return progNum;
+    const list = await listIssues("fortschritt");
+    const i = list.find((x) => x.title === PROG_TITLE) || list[0];
+    progNum = i ? i.number : null;
+    return progNum;
+  }
+  async function pollProg() {
+    const num = await findProg();
+    let data = null;
+    if (num) {
+      const i = await gh("/issues/" + num);
+      const m = (i.body || "").match(/```data\n([\s\S]*?)\n```/);
+      if (m) { try { data = JSON.parse(await ungz(m[1].trim())); } catch (e) {} }
+    }
+    const snap = { exists: !!data, data: () => data, metadata: { fromCache: false, hasPendingWrites: false } };
+    progSubs.forEach((cb) => { try { cb(snap); } catch (e) {} });
+  }
+  async function setProg(p) {
+    const blob = await gz(JSON.stringify(p));
+    const body = "Automatisch von der Offline-App geschrieben. Bitte nicht bearbeiten.\n\n" + summary(p) + "\n\n```data\n" + blob + "\n```\n";
+    const num = await findProg();
+    if (num) await gh("/issues/" + num, { method: "PATCH", body: { body } });
+    else { const i = await gh("/issues", { method: "POST", body: { title: PROG_TITLE, body, labels: ["fortschritt"] } }); progNum = i.number; }
+  }
+
+  // ---------- Polling ----------
+  let polling = false;
+  async function pollAll() {
+    if (polling || !navigator.onLine) return;
+    polling = true;
+    try { await pollGaps(); await pollProg(); say("Verbunden mit GitHub · zuletzt synchronisiert " + new Date().toLocaleTimeString("de-CH", { hour: "2-digit", minute: "2-digit" })); }
+    catch (e) { say("GitHub nicht erreichbar (" + e.message + "). Es wird lokal weiter gespeichert."); }
+    polling = false;
+  }
+  let started = false;
+  function start() {
+    if (started) return; started = true;
+    gapsReady = pollGaps().catch(() => {});
+    setTimeout(pollAll, 1500);
+    setInterval(pollAll, POLL);
+    document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") pollAll(); });
+    window.addEventListener("online", pollAll);
+  }
+
+  // ---------- Schnittstelle wie die claude.ai-Datenbank ----------
+  const db = {
+    collection(name) {
+      return {
+        doc: (id) => ({ set: (obj) => setGap(id, obj) }),
+        onSnapshot(cb, err) { gapSubs.push(cb); start(); },
+      };
+    },
+    doc(path) {
+      return {
+        set: (obj) => setProg(obj),
+        onSnapshot(cb, err) { progSubs.push(cb); start(); },
+      };
+    },
+  };
+  window.claude = window.claude || {};
+  window.claude.use = async (name) => name === "db" ? db : name === "user" ? { id: async () => "github" } : null;
+})();
+</script>
 <style>
 .pwa-foot { padding-block: 0 calc(32px + env(safe-area-inset-bottom)); }
 .pwa-foot .panel { gap: 10px; }

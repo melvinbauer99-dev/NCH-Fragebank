@@ -18,3 +18,7 @@ cd <repo-checkout> && git add -A && git commit -m "Update questions" && git push
 - `footer.html` = export/import of progress (localStorage key `nch-fragebank-v1`,
   same format as the claude.ai artifact) + service-worker registration.
 - Progress in the offline app is per device; it does not sync with the claude.ai artifact.
+- `ghsync.html` = optional GitHub sync (token in localStorage `nch-fragebank-gh-token`): provides a
+  `window.claude.use("db")` shim. Gaps = issues with label `luecke` (meta JSON in `<!-- gap:{...} -->`,
+  Claude appends `<!-- answer -->\n## Antwort\n...` to the body); progress = one issue with label
+  `fortschritt`, body holds gzip+base64 JSON in a ```data block.

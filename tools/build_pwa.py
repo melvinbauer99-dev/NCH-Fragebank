@@ -33,7 +33,7 @@ head_extra += "</style>\n"
 
 version = hashlib.sha256((body + blob + head_extra).encode("utf8")).hexdigest()[:10]
 
-footer = open(os.path.join(here, "footer.html"), encoding="utf8").read()
+footer = open(os.path.join(here, "ghsync.html"), encoding="utf8").read() + open(os.path.join(here, "footer.html"), encoding="utf8").read()
 footer = footer.replace("{{VERSION}}", version).replace("{{COUNT}}", str(nq))
 qdata = '<script type="application/json" id="qdata">' + blob + "</script>\n"
 assert "\n<script>\n(function () {" in body, "app script marker not found"
